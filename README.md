@@ -1,3 +1,5 @@
+- ** Note: This is how I use pi.dev + llama.cpp on my local machine **
+
 # pi-llama-server
 
 Pi extension that integrates a running [llama-server](https://github.com/ggml/llama.cpp) instance with the [Pi Coding Agent](https://github.com/mariozechner/pi-coding-agent). Provides live model listing and ability to load/unload via the `llama-server` API.
