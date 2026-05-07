@@ -1,4 +1,4 @@
-- ** Note: This is how I use pi.dev + llama.cpp on my local machine **
+> Note: This is how I use pi.dev + llama.cpp on my local machine. I created a plugin so that I can update my setup quickly. 
 
 # pi-llama-server
 
