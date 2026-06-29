@@ -2,12 +2,12 @@
 
 # pi-llama-server
 
-Pi extension that integrates a running [llama-server](https://github.com/ggml/llama.cpp) instance with the [Pi Coding Agent](https://github.com/mariozechner/pi-coding-agent). Provides live model listing with accurate, dynamically-fetched model properties, and ability to load/unload via the `llama-server` API.
+Pi extension that integrates a running [llama-server](https://github.com/ggml/llama.cpp) instance with the [Pi Coding Agent](https://github.com/mariozechner/pi-coding-agent). Provides live model listing with accurately detected context sizes and model properties, plus load/unload via the `llama-server` API.
 
 ## Prerequisites
 
-- A running **llama-server** instance (from [llama.cpp](https://github.com/ggml/llama.cpp)) in `router-mode` (the default if you don't mention `-m`), version **b9816** or later (for the `/props` endpoint)
-- [Pi Coding Agent](https://github.com/mariozechner/pi-coding-agent) installed (`@mariozechner/pi-coding-agent`)
+- A running **llama-server** instance (from [llama.cpp](https://github.com/ggml/llama.cpp)) in `router-mode` (the default if you don't mention `-m`), version **b9816** or later for /props support
+- [Pi Coding Agent](https://github.com/mariozechner/pi-coding-agent) installed
 
 ## Install
 
@@ -21,27 +21,22 @@ Or from git:
 pi install git:github.com/user/pi-llama-server
 ```
 
-Pi auto-discovers the extension via `pi.extensions` in `package.json`. No additional setup needed.
-
 ## Configuration
 
 The llama-server URL is resolved in this order:
 
-1. **Per-project config** — create `.pi/llama-server.json` in your project root:
+1. **Per-project config** — create `.pi/llama-server.json`:
    ```json
    { "url": "http://10.0.0.5:9090" }
    ```
-2. **Environment variable** — set globally:
-   ```bash
-   export LLAMA_SERVER_URL=http://10.0.0.5:9090
-   ```
-3. **Default** — falls back to `http://127.0.0.1:8080`
+2. **Environment variable** — `LLAMA_SERVER_URL=http://host:port`
+3. **Default** — `http://127.0.0.1:8080`
 
 ## Usage
 
 ### Browse and manage models
 
-Run the `/models` slash command inside Pi to see all models on the llama-server with live status:
+Run `/models` to see all models with live status and properties:
 
 | Status | Meaning |
 |--------|---------|
@@ -50,61 +45,53 @@ Run the `/models` slash command inside Pi to see all models on the llama-server 
 | 🔴 `failed` | Model failed to load |
 | ⚪ other | Unknown state |
 
-Select a model to see detailed properties, then **load**, **unload**, or **switch** to it.
+Select a model to see detailed properties, then load, unload, or switch.
 
 ### Switch models
 
-Use **Ctrl+P** (or `/model`) in Pi to select any llama-server model for inference. The extension will automatically tell llama-server to load the chosen model.
+Use **Ctrl+P** (or `/model`) to switch. The extension tells llama-server to load the chosen model automatically.
 
 ## Dynamic model properties
 
-The extension fetches accurate model properties from the `/props` endpoint (available in llama.cpp b9816+), with multi-level fallbacks:
+The extension uses two data sources:
 
-| Property | Source (priority order) | Fallback |
-|----------|------------------------|----------|
-| **contextWindow** | 1. `default_generation_settings.n_ctx` from `/props`<br>2. `meta.n_ctx` from `/models`<br>3. `--ctx-size` from model args | 128,000 |
-| **maxTokens** | `default_generation_settings.params.max_tokens` from `/props` | -1 (unlimited) |
-| **reasoning** | `default_generation_settings.params.reasoning_format` from `/props` | `false` |
-| **input modalities** | `modalities` from `/props` + `architecture.input_modalities` from `/models` | `["text"]` |
-| **compat** | `chat_template_caps` from `/props` — infers `supportsDeveloperRole`, `supportsReasoningEffort` | conservative defaults |
+### Fast startup — no model loading needed
 
-### Additional model info displayed in `/models`
+At startup, context sizes and modalities are extracted from the `/models` endpoint metadata (no model loading required):
 
-- **Model alias** (`model_alias`)
-- **Model path** (`model_path`)
-- **Parameter count** (`meta.n_params`) — human-readable (e.g. "35.5B")
-- **Embedding dimensions** (`meta.n_embd`)
-- **Vocabulary size** (`meta.n_vocab`)
-- **Model file size** (`meta.size`) — human-readable (e.g. "20.20 GB")
-- **Training context size** (`meta.n_ctx_train`)
-- **Chat template capabilities** (`chat_template_caps`): tool calling, parallel tools, object arguments, reasoning support, typed content, system role
-- **Server build info** (`build_info`)
-- **Total slots** (`total_slots`)
-- **Tokenizer tokens** (`bos_token`, `eos_token`)
+| Property | Source | Example |
+|----------|--------|---------|
+| **contextWindow** | `--ctx-size` from model args (handles both `--ctx-size 262144` and `--ctx-size=262144` formats) | 262,144 |
+| **input modalities** | `architecture.input_modalities` | `["text"]` |
 
-## How it works
+### Rich details — for loaded models via `/props`
 
-When Pi starts, the extension:
+When you browse a loaded model in `/models`, additional properties are fetched from `GET /props?model=X&autoload=false`:
 
-1. Resolves the llama-server URL from config/env/default
-2. Queries `GET /models` to discover available GGUF models with metadata
-3. For each model, queries `POST /props?model=<id>&autoload=false` to get runtime properties
-4. Derives accurate `contextWindow`, `maxTokens`, `reasoning`, `input` modalities, and `compat` settings
-5. Registers each model as an OpenAI-compatible provider under `{url}/v1`
-6. Listens for model switch events and calls `POST /models/load` on the server
-7. Provides the `/models` interactive command for managing models with rich property display
+| Property | Source |
+|----------|--------|
+| **maxTokens** | `default_generation_settings.params.max_tokens` |
+| **reasoning** | `default_generation_settings.params.reasoning_format` |
+| **runtime ctx** | `default_generation_settings.n_ctx` |
+| **compat settings** | `chat_template_caps` (infers `supportsDeveloperRole`, `supportsReasoningEffort`) |
 
-## llama-server endpoints used
+### Additional info shown in `/models`
+
+- Parameter count (e.g. "35.5B"), file size, embedding dims, vocab size
+- Chat template capabilities (tools, parallel-tools, object-args, reasoning, etc.)
+- Server build info, total slots, tokenizer tokens
+
+## Endpoints used
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/models` | GET | List all models with metadata |
-| `/props` | POST | Fetch model properties (context size, capabilities, etc.) |
+| `/props` | GET | Fetch model properties (loaded models only) |
 | `/models/load` | POST | Load a model |
 | `/models/unload` | POST | Unload a model |
-| `/v1/...` | POST | OpenAI-compatible completions (via Pi provider) |
+| `/v1/...` | POST | OpenAI-compatible completions |
 
 ## Version history
 
 - **1.0.1** — Initial release with static model properties
-- **1.1.0** — Dynamic model properties via `/props` endpoint, rich model info display, accurate compat detection
+- **1.1.0** — Dynamic model properties from /models args and /props, rich model info display
