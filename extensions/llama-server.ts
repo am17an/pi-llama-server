@@ -1,5 +1,4 @@
-// ~/.pi/agent/extensions/llama-server.ts
-// Pi extension for llama-server router integration
+// pi-llama-server — Pi extension for llama-server router integration
 //
 // Configure per-project via .pi/llama-server.json:
 //   { "url": "http://10.0.0.5:9090" }
@@ -16,34 +15,54 @@ import { join } from "node:path";
 // ---------------------------------------------------------------------------
 
 function resolveUrl(cwd: string): string {
-  // 1. per-project config
   try {
     const raw = readFileSync(join(cwd, ".pi", "llama-server.json"), "utf-8");
     const cfg = JSON.parse(raw);
     if (cfg.url) return cfg.url;
-  } catch {
-    // file doesn't exist or isn't valid JSON — that's fine
-  }
-  // 2. env, 3. default
+  } catch { /* ok */ }
   return process.env.LLAMA_SERVER_URL || "http://127.0.0.1:8080";
 }
 
 // ---------------------------------------------------------------------------
-// RPC helper
+// RPC helpers
 // ---------------------------------------------------------------------------
 
-function rpc(base: string, method: string, body?: Record<string, unknown>) {
-  return fetch(`${base}${method}`, {
-    method: body ? "POST" : "GET",
-    headers: body ? { "Content-Type": "application/json" } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-  }).then(async (res) => {
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`${res.status}: ${text.slice(0, 200)}`);
+/** Simple GET request with optional query params */
+async function rpcGet(
+  base: string,
+  path: string,
+  params?: Record<string, string>
+): Promise<unknown> {
+  const url = new URL(path, base);
+  if (params) {
+    for (const [k, v] of Object.entries(params)) {
+      url.searchParams.set(k, v);
     }
-    return res.json();
+  }
+  const res = await fetch(url.toString());
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`${res.status}: ${text.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+/** POST request with JSON body */
+async function rpcPost(
+  base: string,
+  path: string,
+  body: Record<string, unknown>
+): Promise<unknown> {
+  const res = await fetch(`${base}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`${res.status}: ${text.slice(0, 200)}`);
+  }
+  return res.json();
 }
 
 // ---------------------------------------------------------------------------
@@ -52,7 +71,6 @@ function rpc(base: string, method: string, body?: Record<string, unknown>) {
 
 interface ServerModel {
   id: string;
-  aliases?: string[];
   status: {
     value: string;
     args?: string[];
@@ -72,205 +90,177 @@ interface ServerModel {
   };
 }
 
-interface ServerModelResponse {
-  data?: ServerModel[];
-}
-
-interface Modalities {
-  vision?: boolean;
-  video?: boolean;
-  audio?: boolean;
-}
-
-interface ChatTemplateCaps {
-  supports_object_arguments?: boolean;
-  supports_parallel_tool_calls?: boolean;
-  supports_preserve_reasoning?: boolean;
-  supports_string_content?: boolean;
-  supports_system_role?: boolean;
-  supports_tool_calls?: boolean;
-  supports_tools?: boolean;
-  supports_typed_content?: boolean;
-}
-
 interface PropsResponse {
   default_generation_settings?: {
     n_ctx?: number;
-    params?: Record<string, unknown> & {
+    params?: {
       max_tokens?: number;
       reasoning_format?: string;
       reasoning_in_content?: boolean;
       chat_format?: string;
-      seed?: number;
       temperature?: number;
       top_k?: number;
       top_p?: number;
       repeat_penalty?: number;
       samplers?: string[];
-      // ... many more sampling params
+      [key: string]: unknown;
     };
   };
   total_slots?: number;
   model_alias?: string;
   model_path?: string;
-  modalities?: Modalities;
-  chat_template_caps?: ChatTemplateCaps;
-  chat_template?: string;
+  modalities?: {
+    vision?: boolean;
+    video?: boolean;
+    audio?: boolean;
+  };
+  chat_template_caps?: {
+    supports_object_arguments?: boolean;
+    supports_parallel_tool_calls?: boolean;
+    supports_preserve_reasoning?: boolean;
+    supports_string_content?: boolean;
+    supports_system_role?: boolean;
+    supports_tool_calls?: boolean;
+    supports_tools?: boolean;
+    supports_typed_content?: boolean;
+  };
   build_info?: string;
-  is_sleeping?: boolean;
   bos_token?: string;
   eos_token?: string;
-  media_marker?: string;
-  endpoint_slots?: boolean;
-  endpoint_props?: boolean;
-  endpoint_metrics?: boolean;
-  ui?: boolean;
-  ui_settings?: Record<string, unknown>;
-  cors_proxy_enabled?: boolean;
 }
 
 // ---------------------------------------------------------------------------
-// Model discovery
+// Model listing
 // ---------------------------------------------------------------------------
 
 async function listModels(base: string): Promise<ServerModel[]> {
-  const data = (await rpc(base, "/models")) as ServerModelResponse;
+  const data = (await rpcGet(base, "/models")) as {
+    data?: ServerModel[];
+  };
   return (data.data ?? []).filter(
     (m) => m.id && m.id !== "llama-server" && m.id !== "main"
   );
 }
 
+/** Fetch /props for a model. Only works when the model is loaded. */
 async function fetchProps(
   base: string,
   modelId: string
 ): Promise<PropsResponse> {
-  return (await rpc(base, "/props", {
+  return (await rpcGet(base, "/props", {
     model: modelId,
-    autoload: false,
+    autoload: "false",
   })) as PropsResponse;
 }
 
 // ---------------------------------------------------------------------------
-// Property extraction helpers
+// Property extraction from /models metadata (fast, no /props needed)
 // ---------------------------------------------------------------------------
 
-/** Extract true context size from available sources, in priority order */
-function extractContextWindow(
-  props: PropsResponse | undefined,
-  model: ServerModel
-): number {
-  // 1. /props n_ctx (most accurate — the actual runtime context size)
-  if (
-    props?.default_generation_settings?.n_ctx &&
-    props.default_generation_settings.n_ctx > 0
-  ) {
-    return props.default_generation_settings.n_ctx;
-  }
-
-  // 2. /models meta.n_ctx (model file metadata)
-  if (model.meta?.n_ctx && model.meta.n_ctx > 0) {
-    return model.meta.n_ctx;
-  }
-
-  // 3. Parse --ctx-size from model startup args
-  if (model.status.args) {
-    const match = model.status.args.find((a) => a.startsWith("--ctx-size"));
-    if (match) {
-      const size = parseInt(match.split("=")[1] || "0", 10);
+/**
+ * Extract context size from model args.
+ * Handles both `--ctx-size 262144` and `--ctx-size=262144` formats.
+ */
+function extractCtxFromArgs(args: string[] | undefined): number | undefined {
+  if (!args) return undefined;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    // Format: --ctx-size=262144
+    if (a.startsWith("--ctx-size=")) {
+      const size = parseInt(a.split("=")[1], 10);
+      if (!isNaN(size) && size > 0) return size;
+    }
+    // Format: --ctx-size 262144
+    if (a === "--ctx-size" && i + 1 < args.length) {
+      const size = parseInt(args[i + 1], 10);
       if (!isNaN(size) && size > 0) return size;
     }
   }
+  return undefined;
+}
 
-  // 4. Default fallback
+/** Get context window from available sources (fast, no /props) */
+function getContextWindow(model: ServerModel): number {
+  // 1. meta.n_ctx (only present for loaded models)
+  if (model.meta?.n_ctx && model.meta.n_ctx > 0) {
+    return model.meta.n_ctx;
+  }
+  // 2. --ctx-size from args
+  const fromArgs = extractCtxFromArgs(model.status.args);
+  if (fromArgs) return fromArgs;
+  // 3. Default
   return 128000;
 }
 
-/** Extract max output tokens */
-function extractMaxTokens(
-  props: PropsResponse | undefined
-): number {
-  const mt = props?.default_generation_settings?.params?.max_tokens;
-  if (mt !== undefined && mt !== null && mt !== -1) return mt;
-
-  // When -1 ("unlimited"), the model can in theory generate up to the context
-  // window, but practically most GGUF models don't. Return -1 to signal unlimited.
-  return -1;
-}
-
-/** Determine if model supports reasoning / extended thinking */
-function extractReasoning(
-  props: PropsResponse | undefined
-): boolean {
-  const format =
-    props?.default_generation_settings?.params?.reasoning_format;
-  if (!format) return false;
-  const lower = format.toLowerCase();
-  return lower !== "none" && lower !== "disabled";
-}
-
-/** Derive input modalities */
-function extractInputModalities(
-  props: PropsResponse | undefined,
-  model: ServerModel
-): string[] {
+/** Get input modalities from architecture (fast, no /props) */
+function getInputModalities(model: ServerModel): string[] {
+  const mods = model.architecture?.input_modalities ?? [];
   const input: string[] = [];
-
-  // Check /props modalities
-  if (props?.modalities) {
-    if (props.modalities.vision) input.push("image");
-    if (props.modalities.video) input.push("video");
-    if (props.modalities.audio) input.push("audio");
+  for (const m of mods) {
+    if (m === "image") input.push("image");
+    else if (m === "video") input.push("video");
+    else if (m === "audio") input.push("audio");
   }
-
-  // Check /models architecture
-  if (
-    input.length === 0 &&
-    model.architecture?.input_modalities &&
-    model.architecture.input_modalities.length > 0
-  ) {
-    for (const mod of model.architecture.input_modalities) {
-      if (mod === "image") input.push("image");
-      else if (mod === "video") input.push("video");
-      else if (mod === "audio") input.push("audio");
-    }
-  }
-
-  // Always include text
-  if (!input.includes("text")) {
-    input.push("text");
-  }
-
+  if (!input.includes("text")) input.push("text");
   return input;
 }
 
-/** Derive compat settings from chat_template_caps */
-function deriveCompat(chatCaps: ChatTemplateCaps | undefined): {
-  supportsDeveloperRole: boolean;
-  supportsReasoningEffort: boolean;
+/**
+ * Merge /props data into model properties for richer info.
+ * Only called for loaded models (when /props is available).
+ */
+function enrichWithProps(
+  model: ServerModel,
+  props: PropsResponse
+): {
+  contextWindow: number;
+  maxTokens: number;
+  reasoning: boolean;
+  input: string[];
+  compat: { supportsDeveloperRole: boolean; supportsReasoningEffort: boolean };
 } {
-  // If caps exist, use them; otherwise assume conservative defaults
-  if (chatCaps) {
-    return {
-      supportsDeveloperRole: chatCaps.supports_system_role ?? false,
-      supportsReasoningEffort:
-        // Reasoning effort is supported if the chat template has object args
-        // (indicates it can handle structured generation parameters)
-        chatCaps.supports_object_arguments === true,
-    };
-  }
+  // Context: prefer /props n_ctx over everything
+  const propsCtx = props?.default_generation_settings?.n_ctx;
+  const contextWindow =
+    propsCtx && propsCtx > 0 ? propsCtx : getContextWindow(model);
 
-  // No caps available — be conservative
-  return {
-    supportsDeveloperRole: false,
-    supportsReasoningEffort: false,
+  // Max tokens
+  const mt = props?.default_generation_settings?.params?.max_tokens;
+  const maxTokens =
+    mt !== undefined && mt !== null && mt !== -1 ? mt : -1;
+
+  // Reasoning
+  const format = props?.default_generation_settings?.params?.reasoning_format;
+  const reasoning =
+    !!format && format.toLowerCase() !== "none" && format.toLowerCase() !== "disabled";
+
+  // Input: enrich with /props modalities
+  const input: string[] = [];
+  const mods = props?.modalities;
+  if (mods?.vision) input.push("image");
+  if (mods?.video) input.push("video");
+  if (mods?.audio) input.push("audio");
+  if (input.length === 0) {
+    // Fall back to architecture
+    const archInput = getInputModalities(model);
+    for (const m of archInput) if (!input.includes(m)) input.push(m);
+  }
+  if (!input.includes("text")) input.push("text");
+
+  // Compat from chat_template_caps
+  const caps = props?.chat_template_caps;
+  const compat = {
+    supportsDeveloperRole: caps?.supports_system_role ?? false,
+    supportsReasoningEffort: caps?.supports_object_arguments ?? false,
   };
+
+  return { contextWindow, maxTokens, reasoning, input, compat };
 }
 
 // ---------------------------------------------------------------------------
 // Display helpers
 // ---------------------------------------------------------------------------
 
-/** Format byte size to human-readable string */
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -279,7 +269,6 @@ function formatBytes(bytes: number): string {
   return `${size.toFixed(i > 0 ? 2 : 0)} ${units[i]}`;
 }
 
-/** Format parameter count to human-readable string */
 function formatParams(n: number): string {
   if (n >= 1_000_000_000_000) return `${(n / 1_000_000_000_000).toFixed(1)}T`;
   if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
@@ -288,65 +277,58 @@ function formatParams(n: number): string {
   return String(n);
 }
 
-/** Build a rich info string for the /models command */
 function buildModelInfo(
   model: ServerModel,
   props: PropsResponse | undefined
 ): string[] {
-  const ctxSize = extractContextWindow(props, model);
-  const maxTokens = extractMaxTokens(props);
-  const reasoningFmt =
-    props?.default_generation_settings?.params?.reasoning_format ?? "none";
-  const chatFormat =
-    props?.default_generation_settings?.params?.chat_format ?? "unknown";
-
+  const ctx = getContextWindow(model);
   const info: string[] = [
     `🆔  ID:            ${model.id}`,
+    `📐  Context:       ${ctx.toLocaleString()} tokens`,
   ];
 
-  if (props?.model_alias && props.model_alias !== model.id) {
-    info.push(`📛  Alias:         ${props.model_alias}`);
-  }
-
-  info.push(
-    `📐  Context:       ${ctxSize.toLocaleString()} tokens`,
-  );
-
-  if (model.meta?.n_ctx_train && model.meta.n_ctx_train !== ctxSize) {
+  // Enriched props (only if model was loaded and /props succeeded)
+  if (props) {
+    const enriched = enrichWithProps(model, props);
+    if (enriched.contextWindow !== ctx) {
+      info.push(`📐  Runtime ctx:   ${enriched.contextWindow.toLocaleString()} tokens`);
+    }
     info.push(
-      `📐  Train ctx:     ${model.meta.n_ctx_train.toLocaleString()} tokens`,
+      `📤  Max tokens:    ${
+        enriched.maxTokens === -1 ? "unlimited" : enriched.maxTokens.toLocaleString()
+      }`,
     );
+    info.push(
+      `🧠  Reasoning:     ${enriched.reasoning ? "✅ enabled" : "❌ disabled"}`,
+    );
+
+    const modalityDisplay = enriched.input.map((m) => {
+      if (m === "image") return "🖼️ vision";
+      if (m === "video") return "🎬 video";
+      if (m === "audio") return "🎤 audio";
+      return "📝 text";
+    });
+    info.push(`📥  Input:         ${modalityDisplay.join(", ")}`);
+
+    if (props.default_generation_settings?.params?.chat_format) {
+      info.push(`💬  Chat format:   ${props.default_generation_settings.params.chat_format}`);
+    }
+    info.push(
+      `⚙️  Compat:        dev-role=${enriched.compat.supportsDeveloperRole}, reasoning-effort=${enriched.compat.supportsReasoningEffort}`,
+    );
+  } else {
+    // Fast path: only what we have from /models
+    const input = getInputModalities(model);
+    const modalityDisplay = input.map((m) => {
+      if (m === "image") return "🖼️ vision";
+      if (m === "video") return "🎬 video";
+      if (m === "audio") return "🎤 audio";
+      return "📝 text";
+    });
+    info.push(`📥  Input:         ${modalityDisplay.join(", ")}`);
   }
 
-  info.push(
-    `📤  Max tokens:    ${
-      maxTokens === -1 ? "unlimited (generates until EOS)" : maxTokens.toLocaleString()
-    }`,
-  );
-
-  // Reasoning
-  info.push(
-    `🧠  Reasoning:     ${
-      reasoningFmt === "none" || reasoningFmt === "disabled"
-        ? "❌ disabled"
-        : `✅ ${reasoningFmt}`
-    }`,
-  );
-
-  // Input modalities
-  const input = extractInputModalities(props, model);
-  const modalityDisplay = input.map((m) => {
-    if (m === "image") return "🖼️ vision";
-    if (m === "video") return "🎬 video";
-    if (m === "audio") return "🎤 audio";
-    return "📝 text";
-  });
-  info.push(`📥  Input:         ${modalityDisplay.join(", ")}`);
-
-  // Chat format
-  info.push(`💬  Chat format:   ${chatFormat}`);
-
-  // Chat template capabilities
+  // Chat template capabilities (only from /props)
   if (props?.chat_template_caps) {
     const caps = props.chat_template_caps;
     const capsParts: string[] = [];
@@ -362,18 +344,10 @@ function buildModelInfo(
     }
   }
 
-  // Compat inferrence
-  const compat = deriveCompat(props?.chat_template_caps);
-  info.push(
-    `⚙️  Compat:        developer-role=${compat.supportsDeveloperRole}, reasoning-effort=${compat.supportsReasoningEffort}`,
-  );
-
-  // Model file info
+  // Model metadata (from /models, may be empty for unloaded)
   if (props?.model_path) {
     info.push(`📁  Model path:    ${props.model_path}`);
   }
-
-  // Parameter count and file size from meta
   if (model.meta) {
     if (model.meta.n_params) {
       info.push(`🧮  Parameters:    ${formatParams(model.meta.n_params)}`);
@@ -387,6 +361,9 @@ function buildModelInfo(
     if (model.meta.size) {
       info.push(`💾  File size:     ${formatBytes(model.meta.size)}`);
     }
+    if (model.meta.n_ctx_train && model.meta.n_ctx_train !== ctx) {
+      info.push(`📐  Train ctx:     ${model.meta.n_ctx_train.toLocaleString()} tokens`);
+    }
   }
 
   // Server info
@@ -396,15 +373,11 @@ function buildModelInfo(
   if (props?.total_slots !== undefined) {
     info.push(`🎰  Total slots:   ${props.total_slots}`);
   }
-
-  // Tokenizer
   if (props?.bos_token || props?.eos_token) {
     const tokens: string[] = [];
     if (props.bos_token) tokens.push(`BOS="${props.bos_token}"`);
     if (props.eos_token) tokens.push(`EOS="${props.eos_token}"`);
-    if (tokens.length > 0) {
-      info.push(`🔤  Tokenizer:     ${tokens.join(", ")}`);
-    }
+    if (tokens.length > 0) info.push(`🔤  Tokenizer:     ${tokens.join(", ")}`);
   }
 
   return info;
@@ -416,11 +389,10 @@ function buildModelInfo(
 
 export default async function (pi: ExtensionAPI) {
   const cwd = process.cwd();
-
-  // ---- fetch & register ----
   const url = resolveUrl(cwd);
-  let serverModels: ServerModel[];
 
+  // ---- Discover models (fast — GET /models only) ----
+  let serverModels: ServerModel[];
   try {
     serverModels = await listModels(url);
   } catch (e) {
@@ -438,50 +410,37 @@ export default async function (pi: ExtensionAPI) {
 
   if (serverModels.length === 0) return;
 
-  // ---- fetch props for each model to build accurate model definitions ----
-  const modelDefs = [];
+  // ---- Register models with fast metadata-based properties ----
+  // We do NOT call /props here because:
+  // 1. /props requires the model to be loaded (otherwise returns 400)
+  // 2. autoload=true would load ALL models on startup (too slow)
+  // 3. /models metadata (args, architecture) gives us enough for registration
+  const modelDefs = serverModels.map((model) => ({
+    id: String(model.id),
+    name: String(model.id),
+    reasoning: false,
+    input: getInputModalities(model),
+    contextWindow: getContextWindow(model),
+    maxTokens: -1,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    compat: {
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: false,
+    },
+  }));
 
-  for (const model of serverModels) {
-    let props: PropsResponse | undefined;
-
-    try {
-      props = await fetchProps(url, model.id);
-    } catch {
-      // props fetch failed — proceed with fallbacks from model metadata
-    }
-
-    const contextWindow = extractContextWindow(props, model);
-    const maxTokens = extractMaxTokens(props);
-    const reasoning = extractReasoning(props);
-    const input = extractInputModalities(props, model);
-    const compat = deriveCompat(props?.chat_template_caps);
-
-    modelDefs.push({
-      id: String(model.id),
-      name: props?.model_alias ?? String(model.id),
-      reasoning,
-      input,
-      contextWindow,
-      maxTokens,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      compat,
-    });
-  }
-
-  if (modelDefs.length > 0) {
-    pi.registerProvider("llama-server", {
-      baseUrl: `${url}/v1`,
-      api: "openai-completions",
-      apiKey: "not-needed",
-      models: modelDefs,
-    });
-  }
+  pi.registerProvider("llama-server", {
+    baseUrl: `${url}/v1`,
+    api: "openai-completions",
+    apiKey: "not-needed",
+    models: modelDefs,
+  });
 
   // ---- model_select: tell server to load ----
   pi.on("model_select", async (event, ctx) => {
     if (event.model.provider !== "llama-server") return;
     try {
-      await rpc(resolveUrl(ctx.cwd), "/models/load", {
+      await rpcPost(resolveUrl(ctx.cwd), "/models/load", {
         model: event.model.id,
       });
     } catch {
@@ -489,7 +448,7 @@ export default async function (pi: ExtensionAPI) {
     }
   });
 
-  // ---- /models — live browser with rich property display ----
+  // ---- /models — live browser with optional rich props ----
   pi.registerCommand("models", {
     description: "Browse llama-server models (live status + properties)",
     handler: async (_args, ctx) => {
@@ -504,18 +463,12 @@ export default async function (pi: ExtensionAPI) {
 
       const labels = models.map((m) => {
         const c =
-          m.status.value === "loaded"
-            ? "🟢"
-            : m.status.value === "loading"
-            ? "🟡"
-            : m.status.value === "failed"
-            ? "🔴"
-            : "⚪";
-        // Include param count in the label if available
-        const params = m.meta?.n_params
-          ? ` (${formatParams(m.meta.n_params)})`
-          : "";
-        return `${c} ${m.id}${params}`;
+          m.status.value === "loaded" ? "🟢"
+          : m.status.value === "loading" ? "🟡"
+          : m.status.value === "failed" ? "🔴"
+          : "⚪";
+        const ctxSize = getContextWindow(m);
+        return `${c} ${m.id}  (${ctxSize.toLocaleString()} ctx)`;
       });
 
       const choice = await ctx.ui.select("llama-server models:", labels);
@@ -524,27 +477,26 @@ export default async function (pi: ExtensionAPI) {
       const idx = labels.indexOf(choice);
       const model = models[idx];
 
-      // Fetch props for rich display
+      // Try to fetch /props for rich info (only works if loaded)
       let props: PropsResponse | undefined;
-      try {
-        props = await fetchProps(base, model.id);
-      } catch {
-        // props not available — still show what we have
+      if (model.status.value === "loaded") {
+        try {
+          props = await fetchProps(base, model.id);
+        } catch {
+          // props not available — show what we have
+        }
       }
 
-      // Show detailed model info
+      // Show model info
       const info = buildModelInfo(model, props);
       ctx.ui.notify(`\n${info.join("\n")}\n`, "info");
 
       // Actions
       const statusText =
-        model.status.value === "loaded"
-          ? "🟢 loaded"
-          : model.status.value === "loading"
-          ? "🟡 loading"
-          : model.status.value === "failed"
-          ? "🔴 failed"
-          : "⚪ unknown";
+        model.status.value === "loaded" ? "🟢 loaded"
+        : model.status.value === "loading" ? "🟡 loading"
+        : model.status.value === "failed" ? "🔴 failed"
+        : "⚪ unknown";
 
       const actions =
         model.status.value === "loaded"
@@ -558,11 +510,11 @@ export default async function (pi: ExtensionAPI) {
       if (!action || action === "Cancel") return;
 
       if (action === "Unload") {
-        await rpc(base, "/models/unload", { model: model.id });
+        await rpcPost(base, "/models/unload", { model: model.id });
         ctx.ui.notify(`Unloaded ${model.id}`, "success");
       } else {
         if (model.status.value !== "loaded") {
-          await rpc(base, "/models/load", { model: model.id });
+          await rpcPost(base, "/models/load", { model: model.id });
         }
         ctx.ui.notify(
           `Model ${model.id} ready — use /model or Ctrl+P to switch`,
