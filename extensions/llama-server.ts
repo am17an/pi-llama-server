@@ -7,7 +7,7 @@
 // Or globally via env: LLAMA_SERVER_URL=http://host:port
 // Defaults to http://127.0.0.1:8080
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
