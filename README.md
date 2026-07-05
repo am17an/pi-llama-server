@@ -2,7 +2,7 @@
 
 # pi-llama-server
 
-Pi extension that integrates a running [llama-server](https://github.com/ggml/llama.cpp) instance with the [Pi Coding Agent](https://github.com/mariozechner/pi-coding-agent). Provides live model listing and ability to load/unload via the `llama-server` API.
+Pi extension that integrates a running [llama-server](https://github.com/ggml/llama.cpp) instance with the [Pi Coding Agent](https://github.com/earendil-works/pi/tree/main/packages/coding-agent). Provides live model listing and ability to load/unload via the `llama-server` API.
 
 ## Demo
 
@@ -11,7 +11,7 @@ Pi extension that integrates a running [llama-server](https://github.com/ggml/ll
 ## Prerequisites
 
 - A running **llama-server** instance (from [llama.cpp](https://github.com/ggml/llama.cpp)) in `router-mode` (the default if you don't mention `-m`)
-- [Pi Coding Agent](https://github.com/mariozechner/pi-coding-agent) installed (`@mariozechner/pi-coding-agent`)
+- [Pi Coding Agent](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) installed (`@earendil-works/pi-coding-agent`)
 
 ## Install
 
