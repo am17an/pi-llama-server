@@ -43,13 +43,19 @@ interface ServerModel {
   status: { value: string };
 }
 
+function isSelectableModel(id: string): boolean {
+  return (
+    id !== "llama-server" &&
+    id !== "main" &&
+    !/^models:\d+$/.test(id)
+  );
+}
+
 async function listModels(base: string): Promise<ServerModel[]> {
   const data = (await rpc(base, "/models")) as {
     data?: ServerModel[];
   };
-  return (data.data ?? []).filter(
-    (m) => m.id && m.id !== "llama-server" && m.id !== "main"
-  );
+  return (data.data ?? []).filter((m) => m.id && isSelectableModel(m.id));
 }
 
 export default async function (pi: ExtensionAPI) {
