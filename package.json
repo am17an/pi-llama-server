@@ -1,6 +1,6 @@
 {
   "name": "pi-llama-server",
-  "version": "1.0.4",
+  "version": "1.1.0",
   "description": "Pi extension for llama-server router - model discovery, auto-load, per-project config",
   "license": "MIT",
   "keywords": [
