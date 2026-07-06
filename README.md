@@ -2,7 +2,7 @@
 
 # pi-llama-server
 
-Pi extension that integrates a running [llama-server](https://github.com/ggml/llama.cpp) instance with the [Pi Coding Agent](https://github.com/earendil-works/pi/tree/main/packages/coding-agent). Provides live model listing and ability to load/unload via the `llama-server` API.
+Pi extension that integrates a running [llama-server](https://github.com/ggml/llama.cpp) instance with the [Pi Coding Agent](https://github.com/earendil-works/pi/tree/main/packages/coding-agent). Discovers llama-server models and automatically loads the selected model when you switch models in Pi.
 
 ## Demo
 
@@ -43,22 +43,7 @@ The llama-server URL is resolved in this order:
 
 ## Usage
 
-### Browse and manage models
-
-Run the `/models` slash command inside Pi to see all models on the llama-server with live status:
-
-| Status | Meaning |
-|--------|---------|
-| 🟢 `loaded` | Model is loaded and ready |
-| 🟡 `loading` | Model is being loaded |
-| 🔴 `failed` | Model failed to load |
-| ⚪ other | Unknown state |
-
-Select a model to **load**, **unload**, or **switch** to it.
-
-### Switch models
-
-Use **Ctrl+P** (or `/model`) in Pi to select any llama-server model for inference. The extension will automatically tell llama-server to load the chosen model.
+Use **Ctrl+P** (or `/model`) in Pi to select any llama-server model for inference. Pi switches to that model, and the extension automatically tells llama-server to load it. While llama-server reports loading progress, Pi shows a progress bar in the footer status.
 
 ## How it works
 
@@ -68,7 +53,7 @@ When Pi starts, the extension:
 2. Queries `GET /models` to discover available GGUF models
 3. Registers each model as an OpenAI-compatible provider under `{url}/v1`
 4. Listens for model switch events and calls `POST /models/load` on the server
-5. Provides the `/models` interactive command for managing models
+5. Listens to `GET /models/sse` while a selected model is loading to show footer progress
 
 ## llama-server endpoints used
 
@@ -76,5 +61,5 @@ When Pi starts, the extension:
 |----------|--------|---------|
 | `/models` | GET | List all models |
 | `/models/load` | POST | Load a model |
-| `/models/unload` | POST | Unload a model |
+| `/models/sse` | GET | Stream model status/progress events |
 | `/v1/...` | POST | OpenAI-compatible completions (via Pi provider) |
