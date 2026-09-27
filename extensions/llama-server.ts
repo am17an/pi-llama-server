@@ -235,11 +235,18 @@ async function watchModelSse(
   base: string,
   modelId: string,
   ui: StatusUI,
-  signal: AbortSignal
+  signal: AbortSignal,
+  apiKey?: string
 ): Promise<TerminalLoadState | undefined> {
+  const headers: Record<string, string> = {};
+  if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+
   let res: Response;
   try {
-    res = await fetch(`${base}/models/sse`, { signal });
+    res = await fetch(`${base}/models/sse`, {
+      signal,
+      headers: Object.keys(headers).length > 0 ? headers : undefined,
+    });
   } catch {
     return signal.aborted ? undefined : "unavailable";
   }
@@ -280,13 +287,14 @@ async function watchModelSse(
 async function pollTerminalModelState(
   base: string,
   modelId: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  apiKey?: string
 ): Promise<TerminalLoadState> {
   const deadline = Date.now() + MODEL_LOAD_TIMEOUT_MS;
 
   while (!signal.aborted && Date.now() < deadline) {
     try {
-      const model = await findModel(base, modelId);
+      const model = await findModel(base, modelId, apiKey);
       const state = model ? modelState(model) : undefined;
       if (state === "loaded" || state === "sleeping") return "loaded";
       if (state === "failed") return "failed";
@@ -304,7 +312,8 @@ async function trackModelLoad(
   base: string,
   modelId: string,
   ui: StatusUI,
-  signal: AbortSignal
+  signal: AbortSignal,
+  apiKey?: string
 ) {
   ui.setStatus(STATUS_KEY, loadingStatus(ui, modelId));
 
@@ -313,8 +322,8 @@ async function trackModelLoad(
   signal.addEventListener("abort", abort, { once: true });
 
   try {
-    const ssePromise = watchModelSse(base, modelId, ui, controller.signal);
-    const pollPromise = pollTerminalModelState(base, modelId, controller.signal);
+    const ssePromise = watchModelSse(base, modelId, ui, controller.signal, apiKey);
+    const pollPromise = pollTerminalModelState(base, modelId, controller.signal, apiKey);
 
     let result = await Promise.race([ssePromise, pollPromise]);
     if (!result || result === "unavailable") {
@@ -400,7 +409,8 @@ export default async function (pi: ExtensionAPI) {
         base,
         modelId,
         ui,
-        controller.signal
+        controller.signal,
+        apiKey
       );
 
       if (currentState !== "loading") {
