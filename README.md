@@ -60,6 +60,17 @@ The API key is sent as a `Bearer` token on all requests to the server.
 
 Use **Ctrl+P** (or `/model`) in Pi to select any llama-server model for inference. Pi switches to that model, and the extension automatically tells llama-server to load it. While llama-server reports loading progress, Pi shows a progress bar in the footer status.
 
+After each llama-server response, the footer also shows the speed of that request:
+
+```
+PP 965.1 t/s (465 tok) · TG 134.0 t/s (89 tok)
+```
+
+- **PP** (prefill / prompt processing): uncached prompt tokens divided by the time from sending the request to the first streamed token. Prompt tokens served from llama-server's cache are not counted.
+- **TG** (token generation): output tokens after the first, divided by the time from the first to the last streamed token.
+
+Both are measured on the client as the response streams in. TG closely matches llama-server's own `predicted_per_second`. PP also includes per-request overhead (chat templating, tokenization, HTTP), so on short prompts it reads well below llama-server's `prompt_per_second`; the gap shrinks as prompts grow.
+
 ## How it works
 
 When Pi starts, the extension:
