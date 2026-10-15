@@ -39,7 +39,7 @@ The llama-server URL is resolved in this order:
    ```bash
    export LLAMA_SERVER_URL=http://10.0.0.5:9090
    ```
-3. **Default** — falls back to `http://127.0.0.1:8080`
+3. **Default** — falls back to `http://127.0.0.1:9931`
 
 ### API Key (optional)
 
