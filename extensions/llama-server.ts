@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { TextDecoder } from "node:util";
 
 const STATUS_KEY = "llama-server";
+const STATS_STATUS_KEY = "llama-server-stats";
 const MODEL_LOAD_POLL_MS = 500;
 const MODEL_LOAD_TIMEOUT_MS = 10 * 60 * 1000;
 const MODEL_LOAD_BAR_WIDTH = 20;
@@ -71,6 +72,21 @@ interface ActiveLoad {
   controller: AbortController;
   promise: Promise<void>;
 }
+
+interface ResponseTiming {
+  start: number;
+  firstToken?: number;
+}
+
+// Stream events that mean the server has produced its first token.
+const FIRST_TOKEN_EVENTS = new Set([
+  "text_start",
+  "text_delta",
+  "thinking_start",
+  "thinking_delta",
+  "toolcall_start",
+  "toolcall_delta",
+]);
 
 function resolveUrl(cwd: string): string {
   try {
@@ -190,6 +206,17 @@ function loadedStatus(ui: StatusUI, modelId: string): string {
 
 function failedStatus(ui: StatusUI, modelId: string): string {
   return `${themeFg(ui, "error", "Failed to load")}${themeFg(ui, "dim", ` ${modelId}`)}`;
+}
+
+function rateStatus(
+  ui: StatusUI,
+  label: string,
+  tokens: number,
+  ms: number
+): string | undefined {
+  if (tokens <= 0 || ms <= 0) return undefined;
+  const perSecond = (tokens / (ms / 1000)).toFixed(1);
+  return `${themeFg(ui, "dim", `${label} `)}${themeFg(ui, "accent", perSecond)}${themeFg(ui, "dim", ` t/s (${tokens} tok)`)}`;
 }
 
 function parseSseMessage(raw: string): ModelSseEvent | undefined {
@@ -441,7 +468,10 @@ export default async function (pi: ExtensionAPI) {
     }
   }
 
+  let timing: ResponseTiming | undefined;
+
   pi.on("model_select", (event, ctx) => {
+    ctx.ui.setStatus(STATS_STATUS_KEY, undefined);
     if (!isLlamaServerModel(event.model)) return;
     void ensureModelLoaded(ctx.cwd, event.model.id, ctx.ui).catch(
       () => undefined
@@ -451,6 +481,57 @@ export default async function (pi: ExtensionAPI) {
   pi.on("before_provider_request", async (event, ctx) => {
     if (!isLlamaServerModel(ctx.model)) return;
     await ensureModelLoaded(ctx.cwd, ctx.model.id, ctx.ui);
+    // Start timing after any model load so it isn't counted as prefill.
+    timing = { start: performance.now() };
     return event.payload;
+  });
+
+  pi.on("message_update", (event) => {
+    if (
+      timing &&
+      timing.firstToken === undefined &&
+      FIRST_TOKEN_EVENTS.has(event.assistantMessageEvent.type)
+    ) {
+      timing.firstToken = performance.now();
+    }
+  });
+
+  pi.on("message_end", (event, ctx) => {
+    const message = event.message;
+    if (message.role !== "assistant" || message.provider !== "llama-server") {
+      return;
+    }
+
+    const current = timing;
+    timing = undefined;
+    if (
+      current?.firstToken === undefined ||
+      message.stopReason === "error" ||
+      message.stopReason === "aborted"
+    ) {
+      return;
+    }
+
+    const end = performance.now();
+    const parts = [
+      // usage.input excludes prompt tokens served from llama-server's cache.
+      rateStatus(
+        ctx.ui,
+        "PP",
+        message.usage.input,
+        current.firstToken - current.start
+      ),
+      // The first token comes out of the prefill pass, so leave it out of TG.
+      rateStatus(
+        ctx.ui,
+        "TG",
+        message.usage.output - 1,
+        end - current.firstToken
+      ),
+    ].filter((part): part is string => part !== undefined);
+
+    if (parts.length > 0) {
+      ctx.ui.setStatus(STATS_STATUS_KEY, parts.join(themeFg(ctx.ui, "dim", " · ")));
+    }
   });
 };
