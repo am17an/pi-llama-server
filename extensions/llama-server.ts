@@ -7,7 +7,7 @@
 // Or globally via env:
 //   LLAMA_SERVER_URL=http://host:port
 //   LLAMA_SERVER_API_KEY=your-api-key
-// Defaults to http://127.0.0.1:8080
+// Defaults to http://127.0.0.1:9931
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { readFileSync } from "node:fs";
@@ -80,7 +80,7 @@ function resolveUrl(cwd: string): string {
   } catch {
     // Missing or invalid project config is fine.
   }
-  return process.env.LLAMA_SERVER_URL || "http://127.0.0.1:8080";
+  return process.env.LLAMA_SERVER_URL || "http://127.0.0.1:9931";
 }
 
 function resolveApiKey(cwd: string): string | undefined {
